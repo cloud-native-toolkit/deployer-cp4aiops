@@ -77,6 +77,7 @@ spec:
               fi
               oc create secret docker-registry "ibm-entitlement-key" -n $(params.namespace) "--docker-server=cp.icr.io" "--docker-username=cp" "--docker-password=$(params.entitlement-key)"
     - name: create-catalog-source
+      retires: 5
       runAfter:
         - set-retrieved-entitlement-key
         - add-namespace
@@ -101,10 +102,34 @@ spec:
             EOF
             IMGDIGEST=`oc get pods -n openshift-marketplace -l=olm.catalogSource=ibm-operator-catalog --no-headers -o=jsonpath="{.items[0].status.containerStatuses[0].imageID}" -n openshift-marketplace`
             CATALOGIMG=`oc get catalogsource ibm-operator-catalog -n openshift-marketplace -o jsonpath='{.spec.image}'`
+
             if [ "${CATALOGIMG}" = "icr.io/cpopen/ibm-operator-catalog:latest" ]; then
               oc patch catalogsource ibm-operator-catalog -n openshift-marketplace --type=json -p "[{ "op": "replace", "path": "/spec/image", "value": "\"$IMGDIGEST\"" }]"
             fi 
-            oc get CatalogSources ibm-operator-catalog -n openshift-marketplace
+
+            echo "Waiting for catalog source to get created"
+            sleep 60
+            # Define the CatalogSource name and namespace
+            CATALOG_SOURCE_NAME="ibm-operator-catalog"
+            NAMESPACE="openshift-marketplace"
+
+            # Get the CatalogSource information
+            output=$(oc get CatalogSources $CATALOG_SOURCE_NAME -n $NAMESPACE 2>&1)
+
+            # Check if the command succeeded
+            if [[ $? -ne 0 ]]; then
+                echo "Error: $output"
+                exit 1
+            fi
+
+            # Check if the output contains the expected CatalogSource name
+            if echo "$output" | grep -q "$CATALOG_SOURCE_NAME"; then
+                echo "CatalogSource '$CATALOG_SOURCE_NAME' is present."
+                echo "$output"
+            else
+                echo "CatalogSource '$CATALOG_SOURCE_NAME' is NOT present."
+                exit 1
+            fi
     - name: install-cert-manager
       retries: 5
       runAfter:
