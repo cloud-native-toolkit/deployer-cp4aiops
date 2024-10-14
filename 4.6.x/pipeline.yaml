@@ -1,0 +1,400 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: cp4aiops-deploy
+  namespace: default
+spec:
+  params:
+    - name: namespace
+      type: string
+      default: "cp4aiops"
+    - name: STG_CLASS
+      type: string
+      default: "ocs-storagecluster-cephfs"
+    - name: STG_CLASS_BLOCK
+      type: string
+      default: "ocs-storagecluster-ceph-rbd"
+  workspaces:
+    - name: ws
+  tasks:
+    - name: get-sources
+      taskSpec:
+        steps:
+        - name: git-clone-step
+          image: quay.io/ibmtz/ibm-pak-ubi:latest
+          script: |
+            #!/usr/bin/env bash
+            git clone https://github.com/IBM/cp4waiops-samples $(workspaces.ws.path)/cp4waiops-samples
+            cd $(workspaces.ws.path)
+            ls -la
+        workspaces:
+          - name: ws
+    - name: add-namespace
+      taskRef:
+        kind: Task
+        name: ibm-pak
+      params:
+        - name: SCRIPT
+          value: |
+            oc apply -f - <<EOF 
+            kind: Namespace
+            apiVersion: v1
+            metadata:
+              name: $(params.namespace)
+            EOF
+    - name: get-ibm-entitlement-key
+      params:
+        - name: KEY_ID
+          value: 968d7819-f2c5-7b67-c420-3c6bfd51521e
+        - name: SECRETS_MANAGER_ENDPOINT_URL
+          value: >-
+            https://afa20521-cd75-4864-843f-e59fd0ffd49d.us-south.secrets-manager.appdomain.cloud
+      taskRef:
+        kind: Task
+        name: ibmcloud-secrets-manager-get
+    - name: set-retrieved-entitlement-key
+      runAfter:
+        - get-ibm-entitlement-key
+        - add-namespace
+      params:
+        - name: entitlement-key
+          value: $(tasks.get-ibm-entitlement-key.results.secret-value)
+        - name: namespace
+          value: "$(params.namespace)"
+      taskSpec:
+        params:
+          - name: entitlement-key
+          - name: namespace
+        steps:
+          - name: set-entitlement-key
+            image: quay.io/openshift/origin-cli:4.14
+            script: |
+              #!/usr/bin/env bash
+              oc get secret "ibm-entitlement-key" -n $(params.namespace)
+              if [ $? -eq 0 ]; then
+                  echo "Deleting existing secret..."
+                  oc delete secrets "ibm-entitlement-key" -n $(params.namespace)
+              fi
+              oc create secret docker-registry "ibm-entitlement-key" -n $(params.namespace) "--docker-server=cp.icr.io" "--docker-username=cp" "--docker-password=$(params.entitlement-key)"
+    - name: create-catalog-source
+      runAfter:
+        - set-retrieved-entitlement-key
+        - add-namespace
+      taskRef:
+        kind: Task
+        name: ibm-pak
+      params:
+        - name: SCRIPT
+          value: |
+            oc project $(params.namespace)
+            cat << EOF | oc apply -f -
+            apiVersion: operators.coreos.com/v1alpha1
+            kind: CatalogSource
+            metadata:
+              name: ibm-operator-catalog
+              namespace: openshift-marketplace
+            spec:
+              displayName: ibm-operator-catalog
+              publisher: IBM Content
+              sourceType: grpc
+              image: icr.io/cpopen/ibm-operator-catalog:latest
+            EOF
+            IMGDIGEST=`oc get pods -n openshift-marketplace -l=olm.catalogSource=ibm-operator-catalog --no-headers -o=jsonpath="{.items[0].status.containerStatuses[0].imageID}" -n openshift-marketplace`
+            CATALOGIMG=`oc get catalogsource ibm-operator-catalog -n openshift-marketplace -o jsonpath='{.spec.image}'`
+            if [ "${CATALOGIMG}" = "icr.io/cpopen/ibm-operator-catalog:latest" ]; then
+              oc patch catalogsource ibm-operator-catalog -n openshift-marketplace --type=json -p "[{ "op": "replace", "path": "/spec/image", "value": "\"$IMGDIGEST\"" }]"
+            fi 
+            oc get CatalogSources ibm-operator-catalog -n openshift-marketplace
+    - name: install-cert-manager
+      retries: 5
+      runAfter:
+        - create-catalog-source
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+      taskSpec:
+        results:
+          - name: CP4BAyamlFile
+        params:
+          - name: namespace
+        steps:
+          - name: get-marketplace-yaml
+            image: quay.io/ibmtz/ibm-pak-ubi:latest
+            script: |
+              #!/usr/bin/env bash
+              cat << EOF | oc apply -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ibm-cert-manager
+              ---
+              apiVersion: operators.coreos.com/v1
+              kind: OperatorGroup
+              metadata:
+                name: ibm-cert-manager-operator-group
+                namespace: ibm-cert-manager
+              ---
+              apiVersion: operators.coreos.com/v1alpha1
+              kind: Subscription
+              metadata:
+                name: ibm-cert-manager-operator
+                namespace: ibm-cert-manager
+              spec:
+                channel: v4.2
+                installPlanApproval: Automatic
+                name: ibm-cert-manager-operator
+                source: ibm-operator-catalog
+                sourceNamespace: openshift-marketplace
+              EOF
+
+              CERT_MANAGER_NAMESPACE="ibm-cert-manager"
+
+              # Function to check the status of the Cert Manager pods
+              check_cert_manager_pods() {
+                  oc -n "${CERT_MANAGER_NAMESPACE}" get pods
+              }
+
+              # Wait for a few minutes (adjust the time as needed)
+              echo "Waiting for the Cert Manager pods to be in Running status..."
+              sleep 60  # Wait for 1 minute
+
+              # Check the pods
+              echo "Checking the status of the Cert Manager pods..."
+              result=$(check_cert_manager_pods)
+
+              # Check if all pods are in the Running state
+              if echo "$result" | grep -q "Running"; then
+                  echo "All Cert Manager pods are running."
+              else
+                  echo "Some Cert Manager pods are not running. Here is the current state:"
+                  echo "$result"
+                  exit 1
+              fi
+      workspaces:
+        - name: ws
+    - name: install-license-service
+      runAfter:
+        - install-cert-manager
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+      taskSpec:
+        params:
+          - name: namespace
+        steps:
+          - name: script
+            image: quay.io/ibmtz/ibm-pak-ubi:latest
+            script: |
+              #!/usr/bin/env bash
+              cat << EOF | oc apply -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ibm-licensing
+              ---
+              apiVersion: operators.coreos.com/v1
+              kind: OperatorGroup
+              metadata:
+                name: ibm-licensing-operator-group
+                namespace: ibm-licensing
+              spec:
+                targetNamespaces:
+                - ibm-licensing
+              ---
+              apiVersion: operators.coreos.com/v1alpha1
+              kind: Subscription
+              metadata:
+                name: ibm-licensing-operator-app
+                namespace: ibm-licensing
+              spec:
+                channel: v4.2
+                installPlanApproval: Automatic
+                name: ibm-licensing-operator-app
+                source: ibm-operator-catalog
+                sourceNamespace: openshift-marketplace
+              EOF
+      workspaces:
+        - name: ws
+    - name: check-prereq
+      retries: 5
+      timeout: "6h00m00s"
+      runAfter:
+        - install-license-service
+        - get-sources
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+      taskSpec:
+        params:
+          - name: namespace
+        steps:
+          - name: script
+            image: quay.io/ibmtz/ibm-pak-ubi:latest
+            script: |
+              #!/usr/bin/env bash
+              oc project $(params.namespace)
+              ./$(workspaces.ws.path)/cp4waiops-samples/prereq-checker/4.6/prereq.sh -n $(params.namespace)
+        workspaces:
+          - name: ws
+    - name: install-operator
+      retries: 5
+      runAfter:
+        - check-prereq
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+      timeout: "2h00m"
+      taskSpec:
+        params:
+        - name: namespace
+        steps:
+        - name: script
+          image: quay.io/openshift/origin-cli:4.14
+          script: |
+            #!/usr/bin/env bash
+            cat << EOF | oc apply -f -
+            apiVersion: operators.coreos.com/v1
+            kind: OperatorGroup
+            metadata:
+              name: cp4aiops-operator-group
+              namespace: $(params.namespace)
+            spec:
+              targetNamespaces:
+                - $(params.namespace)
+            ---
+            apiVersion: operators.coreos.com/v1alpha1
+            kind: Subscription
+            metadata:
+              name: ibm-aiops-orchestrator
+              namespace: $(params.namespace)
+            spec:
+              channel: v4.6
+              installPlanApproval: Automatic
+              name: ibm-aiops-orchestrator
+              source: ibm-operator-catalog
+              sourceNamespace: openshift-marketplace
+            EOF
+
+            # Function to check the state of the components
+            check_components() {
+                oc get csv -n $(params.namespace) | egrep "ibm-aiops-orchestrator"
+            }
+
+            # Wait for a few minutes (adjust the time as needed)
+            echo "Waiting for the IBM Cloud Pak for AIOps operator to install..."
+            sleep 120  # Wait for 120 seconds
+
+            # Check the components
+            echo "Checking the state of the components..."
+            result=$(check_components)
+
+            if [[ $result == *"Succeeded"* ]]; then
+                echo "IBM Cloud Pak for AIOps installation succeeded."
+            else
+                echo "IBM Cloud Pak for AIOps installation did not succeed. Here is the current state:"
+                echo "$result"
+                exit 1
+            fi
+    - name: install-cloud-pak-aiops
+      runAfter: 
+        - install-operator
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: STG_CLASS
+          value: $(params.STG_CLASS)
+        - name: STG_CLASS_BLOCK
+          value: $(params.STG_CLASS_BLOCK)
+      timeout: "2h00m"
+      taskSpec:
+        params:
+        - name: namespace
+        - name: STG_CLASS
+        - name: STG_CLASS_BLOCK
+        steps:
+        - name: script
+          image: quay.io/openshift/origin-cli:4.14
+          script: |
+            #!/usr/bin/env bash
+            cat << EOF | oc apply -f -
+            apiVersion: orchestrator.aiops.ibm.com/v1alpha1
+            kind: Installation
+            metadata:
+              name: ibm-cp-aiops
+              namespace: $(params.namespace)
+            spec:
+              size: large
+              storageClass: $(params.STG_CLASS)
+              storageClassLargeBlock: $(params.STG_CLASS_BLOCK)
+              imagePullSecret: ibm-entitlement-key
+              topologyModel: application
+              license:
+                accept: true
+              pakModules:
+              - name: aiopsFoundation
+                enabled: true
+              - name: applicationManager
+                enabled: true
+              - name: aiManager
+                enabled: true
+              - name: connection
+                enabled: false
+              - name: logAnomalyDetection
+                enabled: true
+            EOF
+    - name: wait-for-deploy
+      retries: 5
+      runAfter: 
+        - install-cloud-pak-aiops
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+      timeout: "4h00m"
+      taskSpec:
+        params:
+        - name: namespace
+        steps:
+        - name: script
+          image: quay.io/openshift/origin-cli:4.14
+          script: |
+            #!/usr/bin/env bash
+            while oc get installation.orchestrator.aiops.ibm.com -o yaml -n $(params.namespace) | grep -q 'Not Ready'; do
+                echo "Installation is not ready. Checking again in 1 min..."
+                sleep 60  # Optional: wait for a few seconds before checking again
+            done
+            echo "Installation is ready."
+  finally:
+    - name: loginorcleanup
+      retries: 5
+      params:
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: taskStatus
+          value: "$(tasks.status)"
+      taskSpec:
+        params:
+          - name: namespace
+          - name: taskStatus
+        steps:
+          - name: script
+            image: quay.io/ibmtz/ibm-pak-ubi:latest
+            script: |
+              #!/usr/bin/env bash
+
+              if [ $(params.taskStatus) == "Succeeded" ]; then
+                echo "all tasks are successful. No need to cleanup."
+                oc get route -n ${PROJECT_CP4AIOPS} cpd -o jsonpath='{.spec.host}'
+                oc -n ${PROJECT_CP4AIOPS} get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_username}' | base64 -d && echo
+                oc -n ${PROJECT_CP4AIOPS} get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_password}' | base64 -d
+                exit 0
+              fi
+
+              oc project $(params.namespace)
+              echo "CP4AIOPS failed to install in the correct amount of time... Cleaning up"
+
+              cd $(workspaces.ws.path)/cp4waiops-samples/uninstall/4.6/
+              sed -i 's/DELETE_ALL="false"/DELETE_ALL="true"/; s/DELETE_PVCS="false"/DELETE_PVCS="true"/; s/DELETE_CRDS="false"/DELETE_CRDS="true"/' uninstall-cp4waiops.props
+              SKIP_CONFIRM=true ./uninstall-cp4waiops.sh
+      workspaces:
+        - name: ws         
+          workspace: ws

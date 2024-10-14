@@ -1,0 +1,28 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: cp4aiops-run
+  namespace: default
+spec:
+  timeouts:
+    pipeline: "9h30m00s"
+    tasks: "8h59m59s"
+    finally: "0h30m00s"
+  pipelineRef:
+    name: cp4aiops-deploy
+  params:
+    - name: namespace
+      value: "cp4aiops"
+    - name: STG_CLASS
+      value: "ocs-storagecluster-cephfs"
+    - name: STG_CLASS_BLOCK
+      value: "ocs-storagecluster-ceph-rbd"
+  workspaces:
+    - name: ws
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
