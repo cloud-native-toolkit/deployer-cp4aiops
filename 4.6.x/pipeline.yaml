@@ -364,7 +364,7 @@ spec:
               - name: connection
                 enabled: false
               - name: logAnomalyDetection
-                enabled: true
+                enabled: false
             EOF
     - name: wait-for-deploy
       retries: 5
