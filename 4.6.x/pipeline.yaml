@@ -347,7 +347,7 @@ spec:
               name: ibm-cp-aiops
               namespace: $(params.namespace)
             spec:
-              size: large
+              size: small
               storageClass: $(params.STG_CLASS)
               storageClassLargeBlock: $(params.STG_CLASS_BLOCK)
               imagePullSecret: ibm-entitlement-key
@@ -364,7 +364,7 @@ spec:
               - name: connection
                 enabled: false
               - name: logAnomalyDetection
-                enabled: false
+                enabled: true
             EOF
     - name: wait-for-deploy
       retries: 5
