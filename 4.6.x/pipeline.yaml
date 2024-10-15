@@ -407,9 +407,9 @@ spec:
 
               if [ $(params.taskStatus) == "Succeeded" ]; then
                 echo "all tasks are successful. No need to cleanup."
-                oc get route -n ${PROJECT_CP4AIOPS} cpd -o jsonpath='{.spec.host}'
-                oc -n ${PROJECT_CP4AIOPS} get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_username}' | base64 -d && echo
-                oc -n ${PROJECT_CP4AIOPS} get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_password}' | base64 -d
+                oc get route -n $(params.namespace) cpd -o jsonpath='{.spec.host}'
+                oc -n $(params.namespace) get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_username}' | base64 -d && echo
+                oc -n $(params.namespace) get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_password}' | base64 -d
                 exit 0
               fi
 
