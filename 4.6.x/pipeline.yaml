@@ -408,6 +408,8 @@ spec:
               if [ $(params.taskStatus) == "Succeeded" ]; then
                 echo "all tasks are successful. No need to cleanup."
                 oc get route -n $(params.namespace) cpd -o jsonpath='{.spec.host}'
+                # add space 
+                echo 
                 oc -n $(params.namespace) get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_username}' | base64 -d && echo
                 oc -n $(params.namespace) get secret platform-auth-idp-credentials -o jsonpath='{.data.admin_password}' | base64 -d
                 exit 0
