@@ -77,7 +77,7 @@ spec:
               fi
               oc create secret docker-registry "ibm-entitlement-key" -n $(params.namespace) "--docker-server=cp.icr.io" "--docker-username=cp" "--docker-password=$(params.entitlement-key)"
     - name: create-catalog-source
-      retires: 5
+      retries: 5
       runAfter:
         - set-retrieved-entitlement-key
         - add-namespace
