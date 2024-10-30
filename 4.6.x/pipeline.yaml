@@ -190,6 +190,7 @@ spec:
               if echo "$result" | grep -q "Running"; then
                   echo "All Cert Manager pods are running."
               else
+                  oc delete subscription ibm-cert-manager-operator -n ${CERT_MANAGER_NAMESPACE}
                   echo "Some Cert Manager pods are not running. Here is the current state:"
                   echo "$result"
                   exit 1
