@@ -257,6 +257,7 @@ spec:
             image: quay.io/ibmtz/ibm-pak-ubi:latest
             script: |
               #!/usr/bin/env bash
+              set +e
               oc project $(params.namespace)
               ./$(workspaces.ws.path)/cp4waiops-samples/prereq-checker/4.6/prereq.sh -n $(params.namespace)
         workspaces:
